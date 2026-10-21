@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+const MaxPayloadSize = 64 * 1024 * 1024
+
 type CommandType int
 
 const (
@@ -123,7 +125,7 @@ func ReadCommand(r *bufio.Reader) (*Command, error) {
 			continue
 		}
 
-		action := fields[0]
+		action := strings.ToUpper(fields[0])
 
 		switch action {
 		case "PONG":
@@ -139,6 +141,9 @@ func ReadCommand(r *bufio.Reader) (*Command, error) {
 			reason := ""
 			if len(line) > 4 {
 				reason = strings.TrimPrefix(line, "ERR ")
+				if reason == line {
+					reason = strings.TrimPrefix(line, "err ")
+				}
 			}
 			return &Command{Type: CmdErr, ErrorMessage: reason}, nil
 
@@ -161,7 +166,7 @@ func ReadCommand(r *bufio.Reader) (*Command, error) {
 			return &Command{Type: CmdUnsub, Sid: fields[1]}, nil
 
 		case "PUB":
-			if len(fields) < 3 {
+			if len(fields) < 3 || len(fields) > 4 {
 				return &Command{Type: CmdErr, ErrorMessage: "Invalid PUB syntax: expected PUB <subject> [reply-to] <bytes>"}, nil
 			}
 			subject := fields[1]
@@ -176,6 +181,9 @@ func ReadCommand(r *bufio.Reader) (*Command, error) {
 			payloadLen, err := strconv.Atoi(bytesStr)
 			if err != nil || payloadLen < 0 {
 				return &Command{Type: CmdErr, ErrorMessage: "Invalid byte length in PUB command"}, nil
+			}
+			if payloadLen > MaxPayloadSize {
+				return &Command{Type: CmdErr, ErrorMessage: "Payload size exceeds maximum allowed size"}, nil
 			}
 			buf := make([]byte, payloadLen)
 			if _, err := io.ReadFull(r, buf); err != nil {
@@ -193,7 +201,7 @@ func ReadCommand(r *bufio.Reader) (*Command, error) {
 			}, nil
 
 		case "MSG":
-			if len(fields) < 4 {
+			if len(fields) < 4 || len(fields) > 5 {
 				return &Command{Type: CmdErr, ErrorMessage: "Invalid MSG syntax: expected MSG <subject> <sid> [reply-to] <bytes>"}, nil
 			}
 			subject := fields[1]
@@ -209,6 +217,9 @@ func ReadCommand(r *bufio.Reader) (*Command, error) {
 			payloadLen, err := strconv.Atoi(bytesStr)
 			if err != nil || payloadLen < 0 {
 				return &Command{Type: CmdErr, ErrorMessage: "Invalid byte length in MSG command"}, nil
+			}
+			if payloadLen > MaxPayloadSize {
+				return &Command{Type: CmdErr, ErrorMessage: "Payload size exceeds maximum allowed size"}, nil
 			}
 			buf := make([]byte, payloadLen)
 			if _, err := io.ReadFull(r, buf); err != nil {

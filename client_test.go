@@ -242,3 +242,60 @@ func TestRequestReply(t *testing.T) {
 		t.Fatalf("expected 'reply:hello', got %s", reply.Payload)
 	}
 }
+
+func TestValidationAndReconnect(t *testing.T) {
+	server := startMockServer(t)
+	defer server.Close()
+
+	client, err := relaymq.Connect(server.Addr())
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+
+	if err := client.Publish("", "payload"); err == nil {
+		t.Fatalf("expected error publishing to empty subject")
+	}
+
+	if _, err := client.Subscribe("", func(msg relaymq.Message) {}); err == nil {
+		t.Fatalf("expected error subscribing to empty subject")
+	}
+
+	if _, err := client.Subscribe("service.event", nil); err == nil {
+		t.Fatalf("expected error subscribing with nil callback")
+	}
+
+	client.Disconnect()
+	if client.IsConnected() {
+		t.Fatalf("expected client to be disconnected")
+	}
+
+	if err := client.ConnectAddr(server.Addr()); err != nil {
+		t.Fatalf("failed to reconnect: %v", err)
+	}
+	if !client.IsConnected() {
+		t.Fatalf("expected client to be connected after reconnect")
+	}
+	client.Disconnect()
+}
+
+func TestDisconnectAbort(t *testing.T) {
+	server := startMockServer(t)
+
+	client, err := relaymq.Connect(server.Addr())
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+
+	server.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	_, err = client.Ping(500 * time.Millisecond)
+	if err == nil {
+		t.Fatalf("expected error from ping after server closed")
+	}
+
+	_, err = client.Request("service.event", "data", 500*time.Millisecond)
+	if err == nil {
+		t.Fatalf("expected error from request after server closed")
+	}
+}

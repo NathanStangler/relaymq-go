@@ -54,10 +54,12 @@ func (s *Subscription) Unsubscribe() error {
 }
 
 type ClientOptions struct {
-	Host      string
-	Port      uint16
-	AuthToken string
-	Timeout   time.Duration
+	Host               string
+	Port               uint16
+	AuthToken          string
+	Timeout            time.Duration
+	DisconnectCallback DisconnectCallback
+	ErrorCallback      ErrorCallback
 }
 
 type Option func(*ClientOptions)
@@ -71,6 +73,18 @@ func WithAuthToken(token string) Option {
 func WithTimeout(d time.Duration) Option {
 	return func(o *ClientOptions) {
 		o.Timeout = d
+	}
+}
+
+func WithDisconnectCallback(cb DisconnectCallback) Option {
+	return func(o *ClientOptions) {
+		o.DisconnectCallback = cb
+	}
+}
+
+func WithErrorCallback(cb ErrorCallback) Option {
+	return func(o *ClientOptions) {
+		o.ErrorCallback = cb
 	}
 }
 
@@ -89,6 +103,7 @@ type Client struct {
 	disconnectCallback DisconnectCallback
 	errorCallback      ErrorCallback
 	closedOnce         sync.Once
+	closeCh            chan struct{}
 	pongMu             sync.Mutex
 	pongCh             chan struct{}
 	authMu             sync.Mutex
@@ -153,6 +168,15 @@ func (c *Client) Connect(options ClientOptions) error {
 	if c.options.Timeout == 0 {
 		c.options.Timeout = 5 * time.Second
 	}
+	if c.options.DisconnectCallback != nil {
+		c.disconnectCallback = c.options.DisconnectCallback
+	}
+	if c.options.ErrorCallback != nil {
+		c.errorCallback = c.options.ErrorCallback
+	}
+
+	c.closedOnce = sync.Once{}
+	c.closeCh = make(chan struct{})
 
 	dialer := net.Dialer{Timeout: c.options.Timeout}
 	addr := net.JoinHostPort(c.options.Host, strconv.Itoa(int(c.options.Port)))
@@ -238,6 +262,13 @@ func (c *Client) Close() error {
 	var closeErr error
 	c.closedOnce.Do(func() {
 		c.isConnected.Store(false)
+		if c.closeCh != nil {
+			select {
+			case <-c.closeCh:
+			default:
+				close(c.closeCh)
+			}
+		}
 		if c.conn != nil {
 			closeErr = c.conn.Close()
 		}
@@ -327,6 +358,9 @@ func (c *Client) Subscribe(subject string, callback MessageCallback) (*Subscript
 	if subject == "" {
 		return nil, ErrEmptySubject
 	}
+	if callback == nil {
+		return nil, errors.New("relaymq: callback cannot be nil")
+	}
 
 	sidNum := c.nextSid.Add(1)
 	sid := strconv.FormatUint(sidNum, 10)
@@ -410,6 +444,8 @@ func (c *Client) RequestWithContext(ctx context.Context, subject, payload string
 	select {
 	case msg := <-respCh:
 		return msg, nil
+	case <-c.closeCh:
+		return nil, ErrNotConnected
 	case <-ctx.Done():
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, ErrTimeout
@@ -441,8 +477,13 @@ func (c *Client) Ping(timeout ...time.Duration) (int64, error) {
 	}
 
 	select {
-	case <-ch:
+	case _, ok := <-ch:
+		if !ok || !c.isConnected.Load() {
+			return -1, ErrNotConnected
+		}
 		return time.Since(startTime).Microseconds(), nil
+	case <-c.closeCh:
+		return -1, ErrNotConnected
 	case <-time.After(t):
 		c.pongMu.Lock()
 		c.pongCh = nil
@@ -463,7 +504,7 @@ func (c *Client) receiveLoop() {
 	for c.isConnected.Load() {
 		cmd, err := ReadCommand(c.reader)
 		if err != nil {
-			c.isConnected.Store(false)
+			_ = c.Close()
 			c.subMu.RLock()
 			cb := c.disconnectCallback
 			c.subMu.RUnlock()

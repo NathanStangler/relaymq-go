@@ -121,3 +121,48 @@ func TestProtocolSerializers(t *testing.T) {
 		t.Fatalf("unexpected format")
 	}
 }
+
+func TestProtocolCaseInsensitive(t *testing.T) {
+	input := "ping\r\npong\r\nok\r\nerr wrong\r\nsub service.event 1\r\nunsub 1\r\n"
+	r := bufio.NewReader(bytes.NewBufferString(input))
+
+	cmd, err := relaymq.ReadCommand(r)
+	if err != nil || cmd.Type != relaymq.CmdPing {
+		t.Fatalf("expected ping, got %v (%v)", cmd, err)
+	}
+
+	cmd, err = relaymq.ReadCommand(r)
+	if err != nil || cmd.Type != relaymq.CmdPong {
+		t.Fatalf("expected pong, got %v (%v)", cmd, err)
+	}
+
+	cmd, err = relaymq.ReadCommand(r)
+	if err != nil || cmd.Type != relaymq.CmdOk {
+		t.Fatalf("expected ok, got %v (%v)", cmd, err)
+	}
+
+	cmd, err = relaymq.ReadCommand(r)
+	if err != nil || cmd.Type != relaymq.CmdErr || cmd.ErrorMessage != "wrong" {
+		t.Fatalf("expected err, got %v (%v)", cmd, err)
+	}
+
+	cmd, err = relaymq.ReadCommand(r)
+	if err != nil || cmd.Type != relaymq.CmdSub || cmd.Subject != "service.event" || cmd.Sid != "1" {
+		t.Fatalf("expected sub, got %v (%v)", cmd, err)
+	}
+
+	cmd, err = relaymq.ReadCommand(r)
+	if err != nil || cmd.Type != relaymq.CmdUnsub || cmd.Sid != "1" {
+		t.Fatalf("expected unsub, got %v (%v)", cmd, err)
+	}
+}
+
+func TestProtocolMaxPayload(t *testing.T) {
+	input := "PUB test.subject 100000000\r\n"
+	r := bufio.NewReader(bytes.NewBufferString(input))
+
+	cmd, err := relaymq.ReadCommand(r)
+	if err != nil || cmd.Type != relaymq.CmdErr {
+		t.Fatalf("expected ERR for exceeding max payload, got %v (%v)", cmd, err)
+	}
+}
